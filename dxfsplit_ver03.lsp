@@ -384,36 +384,99 @@
   )
 )
 
-(defun escape-string-for-read (s / i len ch out)
-  (setq i 1
-        len (strlen s)
-        out "")
-  (while (<= i len)
-    (setq ch (substr s i 1))
-    (cond
-      ((= ch "\\") (setq out (strcat out "\\\\")))
-      ((= ch "\"") (setq out (strcat out "\\\"")))
-      (T (setq out (strcat out ch)))
-    )
-    (setq i (1+ i))
+;; ============================================================================
+;; 순수 AutoLISP 한글 처리: Unicode escape 수동 파싱
+;; ============================================================================
+
+;; 16진수 문자를 10진수로 변환
+(defun hex-char-to-int (c / a)
+  (setq a (ascii c))
+  (cond
+    ((and (>= a 48) (<= a 57)) (- a 48))   ; 0-9
+    ((and (>= a 65) (<= a 70)) (- a 55))   ; A-F
+    ((and (>= a 97) (<= a 102)) (- a 87))  ; a-f
+    (T 0)
   )
-  out
 )
 
-(defun decode-unicode-escapes (s / escaped parsed)
-  (if (and s (= (type s) 'STR))
-    (if (wcmatch s "*\\U+*")
-      (progn
-        (setq escaped (escape-string-for-read s))
-        (setq parsed (read (strcat "\"" escaped "\"")))
-        (if (= (type parsed) 'STR)
-          parsed
-          s
+;; 16진수 문자열을 10진수로 변환
+(defun hex-to-int (hex-str / result i len)
+  (setq result 0
+        i 1
+        len (strlen hex-str))
+  (while (<= i len)
+    (setq result (+ (* result 16) (hex-char-to-int (substr hex-str i 1))))
+    (setq i (1+ i))
+  )
+  result
+)
+
+;; Unicode escape 시퀀스를 실제 문자로 변환
+;; 지원 패턴: \U+XXXX, \\U+XXXX, \M+nXXXX (MIF 인코딩)
+(defun decode-unicode-escapes (s / result i len char next-char next2 hex-code unicode-val)
+  (if (not (and s (= (type s) 'STR)))
+    ""
+    (progn
+      (setq result ""
+            i 1
+            len (strlen s))
+      (while (<= i len)
+        (setq char (substr s i 1))
+        (cond
+          ;; 백슬래시로 시작하는 이스케이프 시퀀스 처리
+          ((= char "\\")
+           (if (< i len)
+             (progn
+               (setq next-char (substr s (1+ i) 1))
+               (cond
+                 ;; \U+ 패턴: Unicode escape
+                 ((and (= next-char "U")
+                       (<= (+ i 6) len)
+                       (= (substr s (+ i 2) 1) "+"))
+                  (setq hex-code (substr s (+ i 3) 4))
+                  (setq unicode-val (hex-to-int hex-code))
+                  (if (and (> unicode-val 0) (< unicode-val 65536))
+                    (setq result (strcat result (chr unicode-val)))
+                    (setq result (strcat result char next-char))
+                  )
+                  (setq i (+ i 7))
+                 )
+                 ;; \M+ 패턴: MIF 인코딩 (일부 구버전 CAD)
+                 ((and (= next-char "M")
+                       (<= (+ i 7) len)
+                       (= (substr s (+ i 2) 1) "+"))
+                  (setq next2 (substr s (+ i 3) 1))
+                  (setq hex-code (substr s (+ i 4) 4))
+                  (setq unicode-val (hex-to-int hex-code))
+                  (if (and (> unicode-val 0) (< unicode-val 65536))
+                    (setq result (strcat result (chr unicode-val)))
+                    (setq result (strcat result char next-char))
+                  )
+                  (setq i (+ i 8))
+                 )
+                 ;; 그 외 백슬래시 문자는 그대로 유지
+                 (T
+                  (setq result (strcat result char))
+                  (setq i (1+ i))
+                 )
+               )
+             )
+             ;; 마지막 문자가 백슬래시인 경우
+             (progn
+               (setq result (strcat result char))
+               (setq i (1+ i))
+             )
+           )
+          )
+          ;; 일반 문자는 그대로 추가
+          (T
+           (setq result (strcat result char))
+           (setq i (1+ i))
+          )
         )
       )
-      s
+      result
     )
-    ""
   )
 )
 
@@ -434,32 +497,59 @@
   result
 )
 
-(defun collect-entity-text (elst / etype raw base extras raw-fragments raw-combined normalized texts)
+(defun collect-entity-text (elst / etype raw base extras raw-fragments raw-combined normalized texts dxf1-raw dxf3-raw)
   (setq texts '()
         etype (dxf-get 0 elst))
   (cond
     ((or (= etype "TEXT") (= etype "ATTRIB") (= etype "ATTDEF"))
-     (setq raw (replace-par-breaks (ensure-string (dxf-get 1 elst))))
+     ;; DXF 그룹 코드 1의 원본 값 디버깅
+     (setq dxf1-raw (dxf-get 1 elst))
+     (append-debug (strcat "=== " etype " 엔티티 텍스트 추출 ==="))
+     (append-debug (strcat "DXF(1) 원본: " (if dxf1-raw (ensure-string dxf1-raw) "[NIL]")))
+
+     (setq raw (replace-par-breaks (ensure-string dxf1-raw)))
+     (append-debug (strcat "Par-breaks 처리 후: " raw))
+
      (setq normalized (normalize-text raw))
+     (append-debug (strcat "Normalize 후: " normalized))
+
      (if (> (strlen normalized) 0)
        (setq texts (list (cons normalized raw)))
      )
     )
     ((= etype "MTEXT")
+     (append-debug "=== MTEXT 엔티티 텍스트 추출 ===")
      (setq raw-fragments '())
-     (setq base (replace-par-breaks (ensure-string (dxf-get 1 elst))))
+
+     (setq dxf1-raw (dxf-get 1 elst))
+     (append-debug (strcat "DXF(1) 원본: " (if dxf1-raw (ensure-string dxf1-raw) "[NIL]")))
+
+     (setq base (replace-par-breaks (ensure-string dxf1-raw)))
      (if (> (strlen (trim-string base)) 0)
        (setq raw-fragments (append raw-fragments (list base)))
      )
+
      (setq extras (dxf-filter-values 3 elst))
-     (foreach extra extras
-       (setq extra (replace-par-breaks (ensure-string extra)))
-       (if (> (strlen (trim-string extra)) 0)
-         (setq raw-fragments (append raw-fragments (list extra)))
+     (if extras
+       (progn
+         (append-debug (strcat "DXF(3) 개수: " (itoa (length extras))))
+         (foreach extra extras
+           (setq dxf3-raw extra)
+           (append-debug (strcat "DXF(3) 원본: " (if dxf3-raw (ensure-string dxf3-raw) "[NIL]")))
+           (setq extra (replace-par-breaks (ensure-string extra)))
+           (if (> (strlen (trim-string extra)) 0)
+             (setq raw-fragments (append raw-fragments (list extra)))
+           )
+         )
        )
      )
+
      (setq raw-combined (merge-text-fragments raw-fragments))
+     (append-debug (strcat "병합된 원본: " raw-combined))
+
      (setq normalized (normalize-text raw-combined))
+     (append-debug (strcat "Normalize 후: " normalized))
+
      (if (> (strlen normalized) 0)
        (setq texts (list (cons normalized raw-combined)))
      )
@@ -507,25 +597,34 @@
   texts
 )
 
-(defun collect-block-definition-texts (block-name / texts blk ent elst etype)
-  (setq texts '())
+(defun collect-block-definition-texts (block-name / texts blk ent elst etype text-count)
+  (setq texts '()
+        text-count 0)
   (if (and block-name (= (type block-name) 'STR))
     (progn
+      (append-debug (strcat "=== 블록 정의 텍스트 추출: " block-name " ==="))
       (setq blk (tblobjname "BLOCK" block-name))
       (if (not blk)
         (setq blk (cdr (assoc -1 (tblsearch "BLOCK" block-name))))
       )
       (if blk
         (progn
+          (append-debug "블록 정의 찾음")
           (setq ent (entnext blk))
           (while (and ent (setq elst (entget ent)) (/= (dxf-get 0 elst) "ENDBLK"))
             (setq etype (dxf-get 0 elst))
             (if (or (= etype "TEXT") (= etype "MTEXT") (= etype "ATTDEF"))
-              (setq texts (append texts (collect-entity-text elst)))
+              (progn
+                (setq text-count (1+ text-count))
+                (append-debug (strcat "블록 내 " etype " 엔티티 #" (itoa text-count)))
+                (setq texts (append texts (collect-entity-text elst)))
+              )
             )
             (setq ent (entnext ent))
           )
+          (append-debug (strcat "블록 내 총 텍스트 엔티티: " (itoa text-count)))
         )
+        (append-debug "블록 정의를 찾을 수 없음")
       )
     )
   )
