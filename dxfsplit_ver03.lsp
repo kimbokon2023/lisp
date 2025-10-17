@@ -314,7 +314,7 @@
   )
 )
 
-;; 선택 세트의 모든 객체를 기준점 중심으로 90도 회전
+;; 선택 세트의 모든 객체를 기준점 중심으로 반시계방향 90도 회전
 (defun rotate-selection-90 (ss center / i e old-cmdecho)
   (if (and ss (> (sslength ss) 0) center)
     (progn
@@ -322,8 +322,8 @@
       (setq old-cmdecho (getvar "CMDECHO"))
       (setvar "CMDECHO" 0)
 
-      ;; ROTATE 명령으로 90도 회전
-      (command "_.ROTATE" ss "" center "90")
+      ;; ROTATE 명령으로 반시계방향 90도 회전 (-90 또는 270)
+      (command "_.ROTATE" ss "" center "-90")
 
       ;; 명령 에코 복원
       (setvar "CMDECHO" old-cmdecho)
