@@ -300,6 +300,39 @@
     (- (car (cadr bb)) (car (car bb)))
     0.0))
 
+;; 경계 상자의 중심점 계산
+(defun bbox-center (bbox / minx miny maxx maxy)
+  (if (and bbox (>= (length bbox) 2))
+    (progn
+      (setq minx (car (car bbox))
+            miny (cadr (car bbox))
+            maxx (car (cadr bbox))
+            maxy (cadr (cadr bbox)))
+      (list (/ (+ minx maxx) 2.0) (/ (+ miny maxy) 2.0) 0.0)
+    )
+    '(0.0 0.0 0.0)
+  )
+)
+
+;; 선택 세트의 모든 객체를 기준점 중심으로 90도 회전
+(defun rotate-selection-90 (ss center / i e old-cmdecho)
+  (if (and ss (> (sslength ss) 0) center)
+    (progn
+      ;; 명령 에코 끄기
+      (setq old-cmdecho (getvar "CMDECHO"))
+      (setvar "CMDECHO" 0)
+
+      ;; ROTATE 명령으로 90도 회전
+      (command "_.ROTATE" ss "" center "90")
+
+      ;; 명령 에코 복원
+      (setvar "CMDECHO" old-cmdecho)
+      T
+    )
+    nil
+  )
+)
+
 (defun point-inside-bbox (pt bbox)
   ;; Check if point is inside bounding box
   (if (and pt bbox (listp pt) (listp bbox) (>= (length pt) 2) (>= (length bbox) 2))
@@ -411,9 +444,35 @@
   result
 )
 
+;; Unicode 코드포인트를 UTF-8 바이트 시퀀스로 변환
+;; CADian의 chr 함수는 0-255만 지원하므로 UTF-8 인코딩 필요
+(defun unicode-to-utf8-string (code / b1 b2 b3)
+  (cond
+    ;; 1바이트: 0x0000 - 0x007F (0-127)
+    ((<= code 127)
+     (chr code)
+    )
+    ;; 2바이트: 0x0080 - 0x07FF (128-2047)
+    ((<= code 2047)
+     (setq b1 (+ 192 (/ code 64)))           ; 110xxxxx
+     (setq b2 (+ 128 (rem code 64)))         ; 10xxxxxx
+     (strcat (chr b1) (chr b2))
+    )
+    ;; 3바이트: 0x0800 - 0xFFFF (2048-65535) - 한글 포함
+    ((<= code 65535)
+     (setq b1 (+ 224 (/ code 4096)))                    ; 1110xxxx
+     (setq b2 (+ 128 (rem (/ code 64) 64)))             ; 10xxxxxx
+     (setq b3 (+ 128 (rem code 64)))                    ; 10xxxxxx
+     (strcat (chr b1) (chr b2) (chr b3))
+    )
+    ;; 4바이트는 한글에 필요없으므로 생략
+    (T "")
+  )
+)
+
 ;; Unicode escape 시퀀스를 실제 문자로 변환
 ;; 지원 패턴: \U+XXXX, \\U+XXXX, \M+nXXXX (MIF 인코딩)
-(defun decode-unicode-escapes (s / result i len char next-char next2 hex-code unicode-val)
+(defun decode-unicode-escapes (s / result i len char next-char next2 hex-code unicode-val utf8-str)
   (if (not (and s (= (type s) 'STR)))
     ""
     (progn
@@ -435,8 +494,14 @@
                        (= (substr s (+ i 2) 1) "+"))
                   (setq hex-code (substr s (+ i 3) 4))
                   (setq unicode-val (hex-to-int hex-code))
+                  (append-debug (strcat "Unicode 변환: \\U+" hex-code " -> " (itoa unicode-val)))
                   (if (and (> unicode-val 0) (< unicode-val 65536))
-                    (setq result (strcat result (chr unicode-val)))
+                    (progn
+                      ;; Unicode 코드포인트를 UTF-8 바이트로 변환
+                      (setq utf8-str (unicode-to-utf8-string unicode-val))
+                      (append-debug (strcat "UTF-8 변환 결과: " (if utf8-str utf8-str "[FAILED]")))
+                      (setq result (strcat result utf8-str))
+                    )
                     (setq result (strcat result char next-char))
                   )
                   (setq i (+ i 7))
@@ -449,7 +514,10 @@
                   (setq hex-code (substr s (+ i 4) 4))
                   (setq unicode-val (hex-to-int hex-code))
                   (if (and (> unicode-val 0) (< unicode-val 65536))
-                    (setq result (strcat result (chr unicode-val)))
+                    (progn
+                      (setq utf8-str (unicode-to-utf8-string unicode-val))
+                      (setq result (strcat result utf8-str))
+                    )
                     (setq result (strcat result char next-char))
                   )
                   (setq i (+ i 8))
@@ -891,7 +959,7 @@
   )
   ok) 
 
-(defun c:DXFRECT (/ sel cnt i e folder filepath ss polyPts3d pts bbox texts base-filename block-texts textSel filename-data unicode-literal raw-label display-name)
+(defun c:DXFRECT (/ sel cnt i e folder filepath ss polyPts3d pts bbox texts base-filename block-texts textSel filename-data unicode-literal raw-label display-name center)
   (princ "\nSelect closed polylines...")
   ;; Select closed polylines regardless of color
   (if (setq sel (ssget '((0 . "LWPOLYLINE,POLYLINE"))))
@@ -902,10 +970,12 @@
       (while (< i cnt)
         (setq e (ssname sel i))
         (setq pts (get-poly-pts-2d e))
-        (if (and (>= (length pts) 3) (is-poly-closed e))   
+        (if (and (>= (length pts) 3) (is-poly-closed e))
           (progn
             ;; Get bounding box of the polyline
             (setq bbox (bbox-of-pts pts))
+            ;; Calculate center point for rotation
+            (setq center (bbox-center bbox))
             ;; Build polygon selection sets
             (setq polyPts3d (pts-2d->3d (ensure-closed-pts pts)))
             (setq ss (ssget "WP" polyPts3d))
@@ -933,6 +1003,9 @@
               (setq ss (ssadd e ss))
               (progn (setq ss (ssadd)) (setq ss (ssadd e ss)))
             )
+            ;; 90도 회전 (중심점 기준)
+            (rotate-selection-90 ss center)
+            ;; DWG 파일로 저장
             (if (export-selection-to-dwg ss filepath)
               (progn
                 (rename-dwg-with-unicode filepath unicode-literal)

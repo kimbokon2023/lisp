@@ -127,7 +127,7 @@ Unicode Filename Handling (rename-dwg-with-unicode via PowerShell)
 )
 ```
 
-### Unicode Decoding (Pure AutoLISP)
+### Unicode Decoding (Pure AutoLISP with UTF-8 Encoding)
 ```lisp
 ;; Hex character to integer
 (defun hex-char-to-int (c)
@@ -138,10 +138,19 @@ Unicode Filename Handling (rename-dwg-with-unicode via PowerShell)
     ((and (>= a 97) (<= a 102)) (- a 87))  ; a-f
     (T 0)))
 
-;; Convert \U+XXXX to character
-(setq hex-code "D55C")  ; 한
-(setq unicode-val (hex-to-int hex-code))
-(setq korean-char (chr unicode-val))
+;; Convert \U+XXXX to character via UTF-8 bytes
+;; CADian's chr only supports 0-255, so Unicode must be UTF-8 encoded
+(setq hex-code "D55C")              ; 한
+(setq unicode-val (hex-to-int hex-code))  ; 54620
+;; Convert to UTF-8: 54620 → 0xED95 9C → chr(237)+chr(149)+chr(156)
+(setq korean-char (unicode-to-utf8-string unicode-val))
+
+;; UTF-8 encoding for 3-byte range (covers Korean)
+;; U+0800 - U+FFFF: 1110xxxx 10xxxxxx 10xxxxxx
+(setq b1 (+ 224 (/ code 4096)))        ; 1110xxxx
+(setq b2 (+ 128 (rem (/ code 64) 64))) ; 10xxxxxx
+(setq b3 (+ 128 (rem code 64)))        ; 10xxxxxx
+(strcat (chr b1) (chr b2) (chr b3))
 ```
 
 ### Text Normalization Pipeline

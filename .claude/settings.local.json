@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/light/Documents/**)",
+      "Bash(.dwg \")"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
